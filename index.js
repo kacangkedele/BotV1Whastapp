@@ -7,9 +7,9 @@ import QRCode from "qrcode-terminal";
 import fs from "fs";
 
 const DATA_FILE = "data.json";
-const PAIRING_NUMBER = "6281234567890";
+const PAIRING_NUMBER = "628985035456";
 const ADMIN_NUMBERS = [
-  "6281234567890",
+  "62985035456",
   // tambahkan admin lain jika perlu
   // "6289876543210",
 ];
