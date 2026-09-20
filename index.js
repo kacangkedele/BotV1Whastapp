@@ -3,568 +3,216 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
 } from "@whiskeysockets/baileys";
-import QRCode from "qrcode-terminal";
 import fs from "fs";
 
 const DATA_FILE = "data.json";
 const PAIRING_NUMBER = "628985035456";
-const ADMIN_NUMBERS = [
-  "62985035456",
-  // tambahkan admin lain jika perlu
-  // "6289876543210",
-];
+const ADMIN_NUMBERS = ["628985035456"];
 
-function defaultData() {
-  return {
-    active: {},
-    perak_mode: {},
-    bets: {},
-    aliases: {},
-    geseran: {},
-  };
-}
-
+const emptyData = () => ({ active: {}, perak_mode: {}, bets: {}, aliases: {}, geseran: {} });
 function loadData() {
-  if (fs.existsSync(DATA_FILE)) {
-    try {
-      const raw = fs.readFileSync(DATA_FILE, "utf8");
-      const parsed = JSON.parse(raw);
-      const base = defaultData();
-
-      for (const key of Object.keys(base)) {
-        if (!(key in parsed)) {
-          parsed[key] = base[key];
-        }
-      }
-
-      return parsed;
-    } catch (err) {
-      console.log("⚠️ Gagal baca data.json, buat data baru.");
-      return defaultData();
-    }
+  try {
+    if (!fs.existsSync(DATA_FILE)) return emptyData();
+    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+    return { ...emptyData(), ...parsed };
+  } catch {
+    return emptyData();
   }
-  return defaultData();
 }
-
-function saveData(data) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), "utf8");
-}
-
-let DATA = loadData();
-
-function normalizePhone(value) {
-  if (!value) return "";
-  return String(value)
-    .replace(/\s+/g, "")
-    .replace(/[^\d]/g, "");
-}
-
-function chatKey(chatId) {
-  return String(chatId || "");
-}
-
-function isAdmin(phone) {
-  return ADMIN_NUMBERS.includes(normalizePhone(phone));
-}
-
-function getBets(chatId) {
-  const key = chatKey(chatId);
-  if (!DATA.bets[key]) DATA.bets[key] = {};
-  return DATA.bets[key];
-}
-
-function getGeseran(chatId) {
-  const key = chatKey(chatId);
-  if (!DATA.geseran[key]) DATA.geseran[key] = {};
-  return DATA.geseran[key];
-}
-
-function isActive(chatId) {
-  return !!DATA.active[chatKey(chatId)];
-}
-
-function isPerak(chatId) {
-  return DATA.perak_mode[chatKey(chatId)] !== false;
-}
+let data = loadData();
+const save = () => fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+const key = (id) => String(id || "");
+const phone = (id) => String(id || "").replace(/\D/g, "");
+const admin = (id) => ADMIN_NUMBERS.includes(phone(id));
+const bets = (jid) => (data.bets[key(jid)] ||= {});
+const presets = (jid) => (data.geseran[key(jid)] ||= {});
+const active = (jid) => Boolean(data.active[key(jid)]);
+const perak = (jid) => data.perak_mode[key(jid)] !== false;
 
 function parseBet(text) {
-  const t = String(text || "").trim().toUpperCase().replace(",", ".");
-
+  const t = String(text).trim().toUpperCase().replace(",", ".");
   let m = t.match(/^([KB])\s*(\d+(?:\.\d+)?)$/);
   if (m) return [m[1], Number(m[2])];
-
   m = t.match(/^(\d+(?:\.\d+)?)\s*([KB])$/);
   if (m) return [m[2], Number(m[1])];
-
   return [null, null];
 }
+const amount = (n, isPerak) => (isPerak ? Math.round(n * 1000) : n);
+const textOf = (m) => String(
+  m?.conversation || m?.extendedTextMessage?.text || m?.imageMessage?.caption ||
+  m?.videoMessage?.caption || m?.documentMessage?.caption || ""
+).trim();
+const jidOf = (m) => m?.key?.remoteJid || "";
+const senderOf = (m) => m?.key?.participant || m?.key?.remoteJid || "";
+const replySender = (m) => m?.message?.extendedTextMessage?.contextInfo?.participant || "";
+const send = (sock, jid, text) => sock.sendMessage(jid, { text });
 
-function calcAmount(raw, perakMode) {
-  if (perakMode) return Math.round(Number(raw) * 1000);
-  if (Number.isInteger(Number(raw))) return Number(raw);
-  return Number(raw);
-}
+function help() {
+  return `📚 DAFTAR COMMAND
 
-function formatAmount(amount) {
-  return Number.isInteger(Number(amount)) ? String(Number(amount)) : String(amount);
-}
-
-function cleanMessageText(msg) {
-  const text =
-    msg?.conversation ||
-    msg?.extendedTextMessage?.text ||
-    msg?.imageMessage?.caption ||
-    msg?.videoMessage?.caption ||
-    msg?.documentMessage?.caption ||
-    "";
-
-  return String(text).trim();
-}
-
-function senderIdFromMessage(msg) {
-  return (
-    msg?.key?.participant ||
-    msg?.key?.remoteJid ||
-    msg?.participant ||
-    msg?.remoteJid ||
-    ""
-  );
-}
-
-function chatIdFromMessage(msg) {
-  return msg?.key?.remoteJid || msg?.remoteJid || "";
-}
-
-function getQuotedSender(msg) {
-  const context =
-    msg?.message?.extendedTextMessage?.contextInfo ||
-    msg?.extendedTextMessage?.contextInfo ||
-    {};
-
-  return context.participant || context.remoteJid || "";
-}
-
-function makeHelpText() {
-  return `
-📚 DAFTAR COMMAND
-
-📡 Status
 .on — aktifkan bot
 .off — matikan bot
-
-📋 List
-.list — lihat list ronde ini
+.list — lihat list
 .rs — reset list
-
-📊 Rekap
-.rk — rekap total K/B
-
-💰 Mode
+.rk — rekap K/B
 .perak — B1 = 1000
 .nonperak — B1 = 1
-
-🏷 Alias
-.sv NAMA — simpan alias user (reply)
-.svlist — tampilkan alias
-.svdel — hapus alias (reply)
-
-✏️ Edit
 .h NAMA — hapus slot
-.c — bersihkan titik pada bet
-
-🎯 Geseran
+.sv NAMA — simpan alias (reply)
+.svlist — lihat alias
+.svdel — hapus alias (reply)
 .geseran KEY N MAX — buat preset
-KEY b / KEY k — pakai preset
+KEY b / KEY k — gunakan preset
 
-📝 Format Bet
-K5 / 5K
-B10 / 10B
-B1.5 / B1,5
-
-━━━━━━━━━━━━━
-`;
+Format bet: K5, B10, 5K, 10B, B1.5, B1,5`;
 }
 
-async function sendText(sock, jid, text) {
-  await sock.sendMessage(jid, { text });
-}
+async function command(sock, msg, command) {
+  const jid = jidOf(msg);
+  const from = senderOf(msg);
+  const me = phone(from);
 
-async function handleCommand(sock, msg, text) {
-  const sender = senderIdFromMessage(msg);
-  const chatId = chatIdFromMessage(msg);
-  const phone = normalizePhone(sender);
-
-  if (text === ".on") {
-    if (!isAdmin(phone)) return;
-    DATA.active[chatKey(chatId)] = true;
-    if (!(chatKey(chatId) in DATA.perak_mode)) {
-      DATA.perak_mode[chatKey(chatId)] = true;
-    }
-    saveData(DATA);
-
-    await sendText(sock, chatId, "✅ Bot aktif.\nKetik `.cmd` untuk melihat perintah.");
-    return;
+  if (command === ".cmd") return send(sock, jid, help());
+  if (command === ".on") {
+    if (!admin(from)) return;
+    data.active[key(jid)] = true;
+    if (!(key(jid) in data.perak_mode)) data.perak_mode[key(jid)] = true;
+    save();
+    return send(sock, jid, "✅ Bot aktif. Ketik `.cmd` untuk bantuan.");
   }
-
-  if (text === ".off") {
-    if (!isAdmin(phone)) return;
-    DATA.active[chatKey(chatId)] = false;
-    saveData(DATA);
-
-    await sendText(sock, chatId, "❌ Bot dimatikan.");
-    return;
+  if (command === ".off") {
+    if (!admin(from)) return;
+    data.active[key(jid)] = false;
+    save();
+    return send(sock, jid, "❌ Bot dimatikan.");
   }
-
-  if (text === ".cmd") {
-    await sendText(sock, chatId, makeHelpText());
-    return;
+  if (command === ".rs") {
+    if (!admin(from)) return;
+    data.bets[key(jid)] = {};
+    save();
+    return send(sock, jid, "🗑 List dikosongkan. Ronde baru dimulai.");
   }
-
-  if (text === ".list") {
-    const bets = getBets(chatId);
-    if (!Object.keys(bets).length) {
-      await sendText(sock, chatId, "📋 List masih kosong.");
-      return;
-    }
-
-    let kLines = [];
-    let bLines = [];
-
-    for (const uid of Object.keys(bets)) {
-      const info = bets[uid];
-      let line = `• ${info.name} ${formatAmount(info.amount)}`;
-      if (info.username) line += ` ${info.username}`;
-
-      if (info.type === "K") kLines.push(line);
-      else bLines.push(line);
-    }
-
-    const kTotal = Object.values(bets)
-      .filter((x) => x.type === "K")
-      .reduce((sum, x) => sum + Number(x.amount), 0);
-
-    const bTotal = Object.values(bets)
-      .filter((x) => x.type === "B")
-      .reduce((sum, x) => sum + Number(x.amount), 0);
-
-    let msg = "📋 LIST RONDE INI\n\n";
-    if (kLines.length) msg += "🔻 K (Kecil)\n" + kLines.join("\n") + "\n\n";
-    if (bLines.length) msg += "🔺 B (Besar)\n" + bLines.join("\n") + "\n\n";
-
-    msg += "━━━━━━━━━━━━━\n";
-    msg += `📊 Total K: ${formatAmount(kTotal)}\n`;
-    msg += `📊 Total B: ${formatAmount(bTotal)}\n`;
-    msg += `👥 Total pemain: ${Object.keys(bets).length}`;
-
-    await sendText(sock, chatId, msg);
-    return;
+  if (command === ".perak" || command === ".nonperak") {
+    if (!admin(from)) return;
+    data.perak_mode[key(jid)] = command === ".perak";
+    save();
+    return send(sock, jid, command === ".perak" ? "💰 Mode PERAK aktif. B1 = 1000" : "💵 Mode NON-PERAK aktif. B1 = 1");
   }
-
-  if (text === ".rs") {
-    if (!isAdmin(phone)) return;
-    DATA.bets[chatKey(chatId)] = {};
-    saveData(DATA);
-    await sendText(sock, chatId, "🗑 List dikosongkan. Ronde baru dimulai.");
-    return;
+  if (command === ".list") {
+    const list = bets(jid);
+    if (!Object.keys(list).length) return send(sock, jid, "📋 List masih kosong.");
+    const k = Object.values(list).filter(x => x.type === "K");
+    const b = Object.values(list).filter(x => x.type === "B");
+    const lines = (title, values) => values.length ? `${title}\n${values.map(x => `• ${x.name} ${x.amount}`).join("\n")}\n\n` : "";
+    const kt = k.reduce((s, x) => s + Number(x.amount), 0);
+    const bt = b.reduce((s, x) => s + Number(x.amount), 0);
+    return send(sock, jid, `📋 LIST RONDE INI\n\n${lines("🔻 K (Kecil)", k)}${lines("🔺 B (Besar)", b)}━━━━━━━━━━━━━\n📊 Total K: ${kt}\n📊 Total B: ${bt}\n👥 Total pemain: ${Object.keys(list).length}`);
   }
-
-  if (text === ".rk") {
-    const bets = getBets(chatId);
-    if (!Object.keys(bets).length) {
-      await sendText(sock, chatId, "❌ List kosong, tidak ada yang bisa direkap.");
-      return;
-    }
-
-    const kTotal = Object.values(bets)
-      .filter((x) => x.type === "K")
-      .reduce((sum, x) => sum + Number(x.amount), 0);
-
-    const bTotal = Object.values(bets)
-      .filter((x) => x.type === "B")
-      .reduce((sum, x) => sum + Number(x.amount), 0);
-
-    const selisih = Math.abs(kTotal - bTotal);
-    const kCount = Object.values(bets).filter((x) => x.type === "K").length;
-    const bCount = Object.values(bets).filter((x) => x.type === "B").length;
-
-    let msg = "📊 REKAP TOTAL\n\n";
-    msg += `🔻 K: ${kCount} pemain → ${formatAmount(kTotal)}\n`;
-    msg += `🔺 B: ${bCount} pemain → ${formatAmount(bTotal)}\n`;
-    msg += "━━━━━━━━━━━━━\n";
-
-    if (kTotal > bTotal) {
-      msg += `⚠️ B kurang ${formatAmount(selisih)}\n`;
-      msg += `💰 B perlu tambah ${formatAmount(selisih)}`;
-    } else if (bTotal > kTotal) {
-      msg += `⚠️ K kurang ${formatAmount(selisih)}\n`;
-      msg += `💰 K perlu tambah ${formatAmount(selisih)}`;
-    } else {
-      msg += "✅ K & B Seimbang!";
-    }
-
-    await sendText(sock, chatId, msg);
-    return;
+  if (command === ".rk") {
+    const list = bets(jid);
+    if (!Object.keys(list).length) return send(sock, jid, "❌ List kosong.");
+    const kt = Object.values(list).filter(x => x.type === "K").reduce((s, x) => s + Number(x.amount), 0);
+    const bt = Object.values(list).filter(x => x.type === "B").reduce((s, x) => s + Number(x.amount), 0);
+    const d = Math.abs(kt - bt);
+    return send(sock, jid, `📊 REKAP TOTAL\n\n🔻 K: ${Object.values(list).filter(x => x.type === "K").length} pemain → ${kt}\n🔺 B: ${Object.values(list).filter(x => x.type === "B").length} pemain → ${bt}\n━━━━━━━━━━━━━\n${kt === bt ? "✅ K & B Seimbang!" : `⚠️ ${kt > bt ? "B" : "K"} kurang ${d}\n💰 ${kt > bt ? "B" : "K"} perlu tambah ${d}`}`);
   }
-
-  if (text === ".perak") {
-    if (!isAdmin(phone)) return;
-    DATA.perak_mode[chatKey(chatId)] = true;
-    saveData(DATA);
-
-    await sendText(sock, chatId, "💰 Mode PERAK aktif.\n`B1 = 1000`");
-    return;
+  if (command.startsWith(".h ")) {
+    if (!admin(from)) return;
+    const target = command.slice(3).trim().toLowerCase();
+    const list = bets(jid);
+    const found = Object.entries(list).find(([, x]) => String(x.name).toLowerCase() === target);
+    if (!found) return send(sock, jid, `❌ Slot ${target} tidak ditemukan.`);
+    delete list[found[0]]; save();
+    return send(sock, jid, `🗑 Slot ${target} dihapus.`);
   }
-
-  if (text === ".nonperak") {
-    if (!isAdmin(phone)) return;
-    DATA.perak_mode[chatKey(chatId)] = false;
-    saveData(DATA);
-
-    await sendText(sock, chatId, "💵 Mode NON-PERAK aktif.\n`B1 = 1`");
-    return;
+  if (command.startsWith(".geseran ")) {
+    if (!admin(from)) return;
+    const m = command.match(/^\.geseran\s+(\S+)\s+(\d+(?:\.\d+)?)\s+(\d+)$/);
+    if (!m) return send(sock, jid, "❌ Format: `.geseran KEY NOMINAL MAX`");
+    presets(jid)[m[1].toLowerCase()] = { nominal: Number(m[2]), max: Number(m[3]), users: [] };
+    save();
+    return send(sock, jid, `🎯 Preset ${m[1]} dibuat. Gunakan: ${m[1]} b atau ${m[1]} k`);
   }
-
-  if (text.startsWith(".h ")) {
-    if (!isAdmin(phone)) return;
-
-    const target = text.replace(".h ", "").trim().toLowerCase();
-    const bets = getBets(chatId);
-    const found = Object.entries(bets).find(([, info]) => {
-      return String(info.name).toLowerCase() === target;
-    });
-
-    if (!found) {
-      await sendText(sock, chatId, `❌ Tidak ada slot dengan nama \`${target}\`.`);
-      return;
-    }
-
-    const [uid] = found;
-    delete bets[uid];
-    saveData(DATA);
-
-    await sendText(sock, chatId, `🗑 Slot **${target}** dihapus.`);
-    return;
+  if (command.startsWith(".sv ")) {
+    if (!admin(from)) return;
+    const target = replySender(msg);
+    if (!target) return send(sock, jid, "❌ Balas pesan user terlebih dahulu.");
+    (data.aliases[key(jid)] ||= {})[phone(target)] = command.slice(4).trim();
+    save();
+    return send(sock, jid, "✅ Alias tersimpan.");
   }
-
-  if (text === ".c") {
-    if (!isAdmin(phone)) return;
-    if (!msg.quotedMsg) {
-      await sendText(sock, chatId, "❌ Balas pesan bet yang ingin dibersihkan titiknya.");
-      return;
-    }
-
-    const quotedText = cleanMessageText(msg.quotedMsg);
-    const cleaned = quotedText.replace(/\./g, "").replace(/,/g, "");
-    await sendText(sock, chatId, `🧹 Bersih: \`${cleaned}\``);
-    return;
+  if (command === ".svlist") {
+    if (!admin(from)) return;
+    const list = data.aliases[key(jid)] || {};
+    return send(sock, jid, Object.keys(list).length ? "📋 ALIAS\n\n" + Object.entries(list).map(([id, name]) => `• ${name} → ${id}`).join("\n") : "📋 Belum ada alias.");
   }
-
-  if (text.startsWith(".sv ")) {
-    if (!isAdmin(phone)) return;
-    const aliasName = text.replace(".sv ", "").trim();
-
-    if (!msg.quotedMsg) {
-      await sendText(sock, chatId, "❌ Balas pesan user yang ingin disimpan aliasnya.");
-      return;
-    }
-
-    const quotedSender = getQuotedSender(msg);
-    const qid = normalizePhone(quotedSender);
-
-    if (!qid) {
-      await sendText(sock, chatId, "❌ Gagal membaca user dari reply.");
-      return;
-    }
-
-    if (!DATA.aliases[chatKey(chatId)]) DATA.aliases[chatKey(chatId)] = {};
-    DATA.aliases[chatKey(chatId)][qid] = aliasName;
-    saveData(DATA);
-
-    await sendText(sock, chatId, `✅ Alias tersimpan: ${aliasName} → ${qid}`);
-    return;
-  }
-
-  if (text === ".svlist") {
-    if (!isAdmin(phone)) return;
-    const aliases = DATA.aliases[chatKey(chatId)] || {};
-    if (!Object.keys(aliases).length) {
-      await sendText(sock, chatId, "📋 Belum ada alias tersimpan.");
-      return;
-    }
-
-    const lines = Object.entries(aliases).map(([uid, name]) => `• ${name} → ${uid}`);
-    await sendText(sock, chatId, "📋 DAFTAR ALIAS\n\n" + lines.join("\n"));
-    return;
-  }
-
-  if (text === ".svdel") {
-    if (!isAdmin(phone)) return;
-    if (!msg.quotedMsg) {
-      await sendText(sock, chatId, "❌ Balas pesan user yang aliasnya ingin dihapus.");
-      return;
-    }
-
-    const quotedSender = getQuotedSender(msg);
-    const qid = normalizePhone(quotedSender);
-
-    if (!qid) {
-      await sendText(sock, chatId, "❌ Gagal membaca user dari reply.");
-      return;
-    }
-
-    const aliases = DATA.aliases[chatKey(chatId)] || {};
-    if (aliases[qid]) {
-      delete aliases[qid];
-      saveData(DATA);
-      await sendText(sock, chatId, "🗑 Alias dihapus.");
-    } else {
-      await sendText(sock, chatId, "❌ Alias tidak ditemukan.");
-    }
-    return;
-  }
-
-  if (text.startsWith(".geseran ")) {
-    if (!isAdmin(phone)) return;
-
-    const m = text.match(/^\.geseran\s+(\S+)\s+(\d+(?:\.\d+)?)\s+(\d+)$/);
-    if (!m) {
-      await sendText(sock, chatId, "❌ Format salah: `.geseran KEY N MAX`");
-      return;
-    }
-
-    const key = m[1].toLowerCase();
-    const nominal = Number(m[2]);
-    const maxUser = Number(m[3]);
-
-    getGeseran(chatId)[key] = {
-      nominal,
-      max: maxUser,
-      users: [],
-    };
-
-    saveData(DATA);
-
-    await sendText(
-      sock,
-      chatId,
-      `🎯 Geseran \`${key}\` dibuat.\nNominal: ${nominal}\nMax user: ${maxUser}\n\nPakai: \`${key} b\` atau \`${key} k\``
-    );
-    return;
-  }
-
-  const presetMatch = text.match(/^([a-zA-Z]+)\s+([kb])(?:\s*#(\d+(?:\.\d+)?))?$/i);
-  if (presetMatch) {
-    const key = presetMatch[1].toLowerCase();
-    const preset = getGeseran(chatId)[key];
-
-    if (preset) {
-      const betType = presetMatch[2].toUpperCase();
-      const raw = presetMatch[3] ? Number(presetMatch[3]) : Number(preset.nominal);
-      const amount = calcAmount(raw, isPerak(chatId));
-
-      const bets = getBets(chatId);
-      bets[normalizePhone(sender)] = {
-        name: phone,
-        username: "",
-        type: betType,
-        amount,
-      };
-
-      saveData(DATA);
-
-      await sendText(sock, chatId, `✅ ${phone} ${betType}${raw}`);
-      return;
-    }
+  if (command === ".svdel") {
+    if (!admin(from)) return;
+    const target = phone(replySender(msg));
+    if (!target || !data.aliases[key(jid)]?.[target]) return send(sock, jid, "❌ Alias tidak ditemukan.");
+    delete data.aliases[key(jid)][target]; save();
+    return send(sock, jid, "🗑 Alias dihapus.");
   }
 }
 
-async function processBetMessage(sock, msg) {
-  const chatId = chatIdFromMessage(msg);
-  const sender = senderIdFromMessage(msg);
-  const phone = normalizePhone(sender);
-  const text = cleanMessageText(msg);
+async function process(sock, msg) {
+  if (!msg?.message || msg.key.fromMe) return;
+  const jid = jidOf(msg);
+  const text = textOf(msg);
+  if (!jid || !text) return;
+  if (text.startsWith(".")) return command(sock, msg, text);
+  if (!active(jid)) return;
 
-  if (!text || !DATA.active[chatKey(chatId)]) return;
-
-  if (text.startsWith(".")) {
-    await handleCommand(sock, msg, text);
-    return;
-  }
-
-  const [betType, raw] = parseBet(text);
-  if (!betType || raw === null) return;
-
-  const amount = calcAmount(raw, isPerak(chatId));
-  const bets = getBets(chatId);
-  bets[phone] = {
-    name: phone,
-    username: "",
-    type: betType,
-    amount,
-  };
-
-  saveData(DATA);
-
-  await sendText(sock, chatId, `✅ ${phone} ${betType}${raw}`);
+  const preset = text.match(/^([a-zA-Z]+)\s+([kb])(?:\s*#(\d+(?:\.\d+)?))?$/i);
+  let type, raw;
+  if (preset && presets(jid)[preset[1].toLowerCase()]) {
+    type = preset[2].toUpperCase();
+    raw = preset[3] ? Number(preset[3]) : presets(jid)[preset[1].toLowerCase()].nominal;
+  } else [type, raw] = parseBet(text);
+  if (!type) return;
+  const id = phone(senderOf(msg));
+  bets(jid)[id] = { name: data.aliases[key(jid)]?.[id] || id, type, amount: amount(raw, perak(jid)) };
+  save();
+  await send(sock, jid, `✅ ${data.aliases[key(jid)]?.[id] || id} ${type}${raw}`);
 }
 
 async function connect() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
   const { version } = await fetchLatestBaileysVersion();
+  const sock = makeWASocket({ version, auth: state, printQRInTerminal: false, browser: ["Ubuntu", "Chrome", "1.0.0"] });
+  let requested = false;
 
-  const sock = makeWASocket({
-    version,
-    printQRInTerminal: false,
-    auth: state,
-    browser: ["Chrome (Linux)", "", ""],
-  });
-
-  let pairingRequested = false;
-
-  if (!pairingRequested && !sock.authState?.creds?.registered) {
-    pairingRequested = true;
-    try {
-      const phone = normalizePhone(PAIRING_NUMBER);
-      const code = await sock.requestPairingCode(phone);
-
-      console.log("\n========================================");
-      console.log("       KODE TAUTAN WHATSAPP");
-      console.log("========================================");
-      console.log(`          ${code}`);
-      console.log("========================================");
-      console.log("Masukkan kode di WhatsApp > Perangkat tertaut > Tautkan dengan nomor telepon");
-      console.log("========================================\n");
-    } catch (error) {
-      console.error("❌ Gagal membuat pairing code:", error);
-    }
+  // Penting: requestPairingCode harus dipanggil setelah socket dibuat,
+  // tetapi JANGAN menunggu connection === "open" karena open berarti sudah login.
+  if (!state.creds.registered) {
+    setTimeout(async () => {
+      if (requested) return;
+      requested = true;
+      try {
+        const code = await sock.requestPairingCode(phone(PAIRING_NUMBER));
+        console.log(`\n========================================\nKODE TAUTAN WHATSAPP: ${code}\n========================================`);
+        console.log("WhatsApp > Perangkat tertaut > Tautkan dengan nomor telepon\n");
+      } catch (error) {
+        console.error("❌ Pairing gagal:", error?.message || error);
+        console.error("Pastikan internet aktif, nomor benar, dan coba ulang setelah menghapus auth_info.");
+      }
+    }, 4000);
   }
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
-
+  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    if (connection === "open") console.log("✅ WhatsApp tersambung.");
     if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-
-      if (shouldReconnect) {
-        console.log("🔄 Menghubungkan ulang...");
-        setTimeout(connect, 2000);
-      } else {
-        console.log("❌ Koneksi ditutup.");
-      }
-    } else if (connection === "open") {
-      console.log("✅ WhatsApp tersambung.");
+      const status = lastDisconnect?.error?.output?.statusCode;
+      if (status !== DisconnectReason.loggedOut) {
+        console.log("🔄 Koneksi terputus, mencoba ulang...");
+        setTimeout(connect, 3000);
+      } else console.log("❌ Sesi logout. Hapus auth_info untuk login ulang.");
     }
   });
-
   sock.ev.on("creds.update", saveCreds);
-
   sock.ev.on("messages.upsert", async ({ messages }) => {
-    for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
-      await processBetMessage(sock, msg);
-    }
+    for (const msg of messages) await process(sock, msg);
   });
 }
 
-connect();
+connect().catch((error) => console.error("❌ Fatal:", error));
