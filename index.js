@@ -7,6 +7,7 @@ import QRCode from "qrcode-terminal";
 import fs from "fs";
 
 const DATA_FILE = "data.json";
+const PAIRING_NUMBER = "6281234567890";
 const ADMIN_NUMBERS = [
   "6281234567890",
   // tambahkan admin lain jika perlu
@@ -513,17 +514,33 @@ async function connect() {
 
   const sock = makeWASocket({
     version,
-    printQRInTerminal: true,
+    printQRInTerminal: false,
     auth: state,
     browser: ["Chrome (Linux)", "", ""],
   });
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+  let pairingRequested = false;
 
-    if (qr) {
-      QRCode.generate(qr, { small: true });
+  if (!pairingRequested && !sock.authState?.creds?.registered) {
+    pairingRequested = true;
+    try {
+      const phone = normalizePhone(PAIRING_NUMBER);
+      const code = await sock.requestPairingCode(phone);
+
+      console.log("\n========================================");
+      console.log("       KODE TAUTAN WHATSAPP");
+      console.log("========================================");
+      console.log(`          ${code}`);
+      console.log("========================================");
+      console.log("Masukkan kode di WhatsApp > Perangkat tertaut > Tautkan dengan nomor telepon");
+      console.log("========================================\n");
+    } catch (error) {
+      console.error("❌ Gagal membuat pairing code:", error);
     }
+  }
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
 
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
